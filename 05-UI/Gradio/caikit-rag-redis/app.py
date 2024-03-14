@@ -100,6 +100,7 @@ rds = Redis.from_existing_index(
 # LLM
 llm = caikit_tgis_langchain.CaikitLLM(
     inference_server_url=INFERENCE_SERVER_URL,
+    verify=False,
     model_id=MODEL_ID,
     max_new_tokens=MAX_NEW_TOKENS,
     min_new_tokens=MIN_NEW_TOKENS,
