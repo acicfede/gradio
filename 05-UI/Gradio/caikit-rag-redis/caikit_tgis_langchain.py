@@ -57,7 +57,6 @@ class CaikitLLM(LLM):
         if stop is not None:
             raise ValueError("stop kwargs are not permitted.")
 
-        self.caikit_tgis_text_generation_stub = CaikitTgisTextGeneration(channel)
 
         if self.streaming:
             completion = ""
