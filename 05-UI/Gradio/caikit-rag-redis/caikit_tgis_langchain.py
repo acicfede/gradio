@@ -54,15 +54,8 @@ class CaikitLLM(LLM):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> str:
-        #if self.certificate_chain != "":
-         #   with open(self.certificate_chain, 'rb') as f:
-         #       creds = grpc.ssl_channel_credentials(f.read())
         if stop is not None:
             raise ValueError("stop kwargs are not permitted.")
-        #else:
-        #    creds = None
-        server_address = self.inference_server_url
-        channel = grpc.secure_channel(server_address, creds)
 
         self.caikit_tgis_text_generation_stub = CaikitTgisTextGeneration(channel)
 
