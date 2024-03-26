@@ -1,114 +1,68 @@
-import os
-import random
-import time
-from collections.abc import Generator
-from queue import Empty, Queue
-from threading import Thread
-from typing import Optional
+inference_server_url = "https://demo-2-plus-demo.apps.openshiftai2.acic.local"
+infer_url = f"{inference_server_url}/api/v1/task/text-generation"
+str_infer_url = f"{inference_server_url}/api/v1/task/server-streaming-text-generation"
+redis_url = "redis://default:j5kL7T3W@my-doc-headless.redis.svc.cluster.local:16735"
+index_name = "dellwebdocs"
+schema_name = "redis_schema_ai.yaml"
+model_id = "test"
 
-import caikit_tgis_langchain
-import gradio as gr
-from dotenv import load_dotenv
-from langchain.callbacks.base import BaseCallbackHandler
-from langchain.chains import RetrievalQA
-from langchain.embeddings.huggingface import HuggingFaceEmbeddings
+
+
+from typing import Any, Iterator, List, Mapping, Optional, Union
+from warnings import warn
+from caikit_nlp_client import HttpClient
 from langchain.prompts import PromptTemplate
+from langchain.embeddings.huggingface import HuggingFaceEmbeddings
 from langchain.vectorstores.redis import Redis
+from langchain.llms.base import LLM
+from langchain.callbacks.manager import CallbackManagerForLLMRun
+from langchain.schema.output import GenerationChunk
+from langchain.chains import RetrievalQA
+#from langchain.callbacks.streaming stdout import StreamingStdOutCallbackHandler
+from langchain.callbacks.streamlit.streamlit_callback_handler import StreamlitCallbackHandler
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
+from langchain.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationSummaryBufferMemory
+from langchain.prompts.chat import SystemMessagePromptTemplate
+from langchain.chains import LLMChain
 
-load_dotenv()
 
-# Parameters
 
-APP_TITLE = os.getenv('APP_TITLE', 'Talk with your documentation')
+class CaikitLLM(LLM):
+    @property
+    def _llm_type(self) -> str:
+        return "llama-2-fb-chat-hf"
 
-INFERENCE_SERVER_URL = os.getenv('INFERENCE_SERVER_URL')
-MODEL_ID = os.getenv('MODEL_ID')
-MAX_NEW_TOKENS = int(os.getenv('MAX_NEW_TOKENS', 512))
-MIN_NEW_TOKENS = int(os.getenv('MAX_NEW_TOKENS', 100))
+    def _call(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> str:
+        if stop is not None:
+            raise ValueError("stop kwargs are not permitted.")
 
-REDIS_URL = os.getenv('REDIS_URL')
-REDIS_INDEX = os.getenv('REDIS_INDEX')
 
-# Streaming implementation
-class QueueCallback(BaseCallbackHandler):
-    """Callback handler for streaming LLM responses to a queue."""
-
-    def __init__(self, q):
-        self.q = q
-
-    def on_llm_new_token(self, token: str, **kwargs: any) -> None:
-        self.q.put(token)
-
-    def on_llm_end(self, *args, **kwargs: any) -> None:
-        return self.q.empty()
-
-def remove_source_duplicates(input_list):
-    unique_list = []
-    for item in input_list:
-        if item.metadata['source'] not in unique_list:
-            unique_list.append(item.metadata['source'])
-    return unique_list
-
-def stream(input_text) -> Generator:
-    # Create a Queue
-    job_done = object()
-
-    # Create a function to call - this will run in a thread
-    def task():
-        resp = qa_chain({"query": input_text})
-        sources = remove_source_duplicates(resp['source_documents'])
-        if len(sources) != 0:
-            q.put("\n*Sources:* \n")
-            for source in sources:
-                q.put("* " + str(source) + "\n")
-        q.put(job_done)
-
-    # Create a thread and start the function
-    t = Thread(target=task)
-    t.start()
-
-    content = ""
-
-    # Get each new token from the queue and yield for our generator
-    while True:
-        try:
-            next_token = q.get(True, timeout=1)
-            if next_token is job_done:
-                break
-            if isinstance(next_token, str):
-                content += next_token
-                yield next_token, content
-        except Empty:
-            continue
-
-# A Queue is needed for Streaming implementation
-q = Queue()
-
-############################
-# LLM chain implementation #
-############################
-
-# Document store: Redis vector store
+        client = HttpClient(inference_server_url, verify=False)
+        return client.generate_text(
+            model_id,
+            prompt,
+            preserve_input_text=False,
+            max_new_tokens=50,
+            min_new_tokens=5,
+            timeout=36000.0,
+        )
+    
 embeddings = HuggingFaceEmbeddings()
 rds = Redis.from_existing_index(
     embeddings,
-    redis_url=REDIS_URL,
-    index_name=REDIS_INDEX,
-    schema="redis_schema.yaml"
+    redis_url=redis_url,
+    index_name=index_name,
+    schema=schema_name
 )
 
-# LLM
-llm = caikit_tgis_langchain.CaikitLLM(
-    inference_server_url=INFERENCE_SERVER_URL,
-    verify=False,
-    model_id=MODEL_ID,
-    max_new_tokens=MAX_NEW_TOKENS,
-    min_new_tokens=MIN_NEW_TOKENS,
-    streaming=True,
-    callbacks=[QueueCallback(q)]
-)
-
-# Prompt
 template="""<s>[INST] <<SYS>>
 You are a helpful, respectful and honest assistant named DellDigitalAssistant answering questions about any queries realated to Dell Technologies , specially related to Dell Validated solution for microsoft sql server .
 You will be given a question you need to answer, and a context to provide you with information. You must answer the question based as much as possible on this context.
@@ -116,42 +70,50 @@ Always answer as helpfully as possible, while being safe. Your answers should no
 
 If a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information.
 <</SYS>>
-
+History: {chat_history}
 Question: {question}
-Context: {context} [/INST]
+Context: {context} [/INST]</s>
 """
-QA_CHAIN_PROMPT = PromptTemplate.from_template(template)
 
-qa_chain = RetrievalQA.from_chain_type(
-    llm,
-    retriever=rds.as_retriever(
-        search_type="similarity",
-        search_kwargs={"k": 4, "distance_threshold": 0.5}),
-    chain_type_kwargs={"prompt": QA_CHAIN_PROMPT},
-    return_source_documents=True
-    )
+prompt = PromptTemplate.from_template(template)
 
-# Gradio implementation
-def ask_llm(message, history):
-    for next_token, content in stream(message):
-        yield(content)
+llm = CaikitLLM()
 
-with gr.Blocks(title="Dell-Digital-Assist", css="footer {visibility: hidden}") as demo:
-    chatbot = gr.Chatbot(
-        show_label=False,
-        avatar_images=(None,'assets/conversation.svg'),
-        render=False
-        )
-    gr.ChatInterface(
-        ask_llm,
-        chatbot=chatbot,
-        clear_btn=None,
-        retry_btn=None,
-        undo_btn=None,
-        stop_btn=None,
-        description=APP_TITLE
-        )
+memory = ConversationSummaryBufferMemory(
+    llm=llm,
+    output_key='answer',
+    memory_key='chat_history',
+    return_messages=True)
 
+retriever = rds.as_retriever(
+    search_type="similarity",
+    search_kwargs={"k": 4, "distance_treshold": 0.5, "include_metadata": True})
+
+chain = ConversationalRetrievalChain.from_llm(
+    llm=llm,
+    memory=memory,
+    chain_type="stuff",
+    retriever=retriever,
+    return_source_documents=True,
+    get_chat_history=lambda h : h,
+    verbose=False)
+    
+import gradio as gr
+import random
+import time
+
+def respond(question, history):
+    result = chain.invoke({"question": question, "chat_history": history})
+    return result['answer']
+
+
+
+demo = gr.ChatInterface(
+    respond,  # Your chatbot function
+    examples=["What is ObjectScale?", "What is OpenshiftAI?", "merhaba"],  # Sample inputs for the chatbot
+    title="ACIC ROME BOT",  # Title for the interface
+    theme="default",
+)
 if __name__ == "__main__":
     demo.queue().launch(
         server_name='0.0.0.0',
